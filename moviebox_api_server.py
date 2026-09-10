@@ -918,7 +918,27 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
 
     res = s["stream"].get_play_info(subject_id, season=res_se, episode=res_ep, resource_id=resource_id)
     data = res.get("data", {})
+    logger.info(f"PLAY-INFO RAW RESPONSE: {res}")
     streams = data.get("streamList") or data.get("streams") or []
+    
+    # OVERRIDE DUMMY URL WITH URLPREFIX DECODE
+    import base64
+    import re
+    for _st in streams:
+        _sc = _st.get("signCookie", "")
+        if "urlprefix=" in _sc:
+            match = re.search(r'urlprefix=([^:]+)', _sc)
+            if match:
+                b64_prefix = match.group(1)
+                b64_prefix += "=" * ((4 - len(b64_prefix) % 4) % 4)
+                try:
+                    prefix_url = base64.b64decode(b64_prefix).decode('utf-8')
+                    if prefix_url.startswith("http"):
+                        # MovieBox Dash/HLS streams use index.mpd for DASH streams
+                        _st["url"] = prefix_url + "index.mpd"
+                        logger.info(f"ANTI-PIRACY BYPASS: Decoded real URL -> {_st['url']}")
+                except Exception as e:
+                    logger.error(f"URLPREFIX decode error: {e}")
     
     # Fallback to resourceDetectors inside movie/show detail if no streams found in play-info
     if not streams:
@@ -1013,8 +1033,8 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
         logger.info(f"Primary Cloud Offline for {subject_id}. Engaing Resource Mirror Rotation...")
         try:
             hdrs = {
-                "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 13; SM-S918B Build/TP1A.220624.014)",
-                "X-M-Version": "11.7.0"
+                "User-Agent": "MovieBox/4.0.02 (Android 14; Pixel 6)",
+                "X-M-Version": "4.0.02"
             }
             
             # PHASE 1: Resource Discovery via Metadata (High Parity with Subtitles)
@@ -1114,7 +1134,7 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
         logger.info(f"Entering Phase 4 Cluster Rotation for {subject_id}")
         
         clusters = [
-            ("https://api6.aoneroom.com", "/wefeed-mobile-bff/subject-api/play-info"),
+            ("https://apig.inmoviebox.com", "/wefeed-mobile-bff/subject-api/play-info"),
             ("https://api5.aoneroom.com", "/wefeed-mobile-bff/subject-api/play-info"),
             ("https://api-sin.aoneroom.com", "/wefeed-mobile-bff/subject-api/play-info"),
             ("https://v-ios.aoneroom.com", "/wefeed-mobile-bff/subject-api/play-info"),
@@ -1123,8 +1143,8 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
         ]
         
         hdrs = {
-            "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 13; SM-S918B Build/TP1A.220624.014)",
-            "X-M-Version": "11.7.0"
+            "User-Agent": "MovieBox/4.0.02 (Android 14; Pixel 6)",
+            "X-M-Version": "4.0.02"
         }
         
         orig_base = s["client"].BASE_URL
@@ -1628,11 +1648,11 @@ def launch_player(player: str, url: str, cookie: Optional[str] = None, subject_i
     
     # Referer varies by CDN
     if "sacdn2.hakunaymatata.com" in url:
-        referer = "https://api6.aoneroom.com/" # REQUIRED FOR SACDN2
+        referer = "https://apig.inmoviebox.com/" # REQUIRED FOR SACDN2
     elif "hakunaymatata.com" in url:
         referer = "https://www.movieboxpro.app/" # PROVEN REFERER FOR HAKUNA
     else:
-        referer = "https://api6.aoneroom.com/"
+        referer = "https://apig.inmoviebox.com/"
     
     if player.lower() == "mpv":
         cmd = ["mpv", f"--user-agent={ua}", f"--referrer={referer}", "--cache=yes"]

@@ -2,6 +2,11 @@
 
 This document outlines the internal communication protocol, authentication handshake, and endpoint structure of the official MovieBox Pro Android application (v16.2.1), discovered via deep-decompilation and traffic analysis.
 
+## What's New in Version 4.0.02
+As of the newly discovered v4.0.02 API, the following critical changes have been implemented:
+*   **Identity Headers:** The `X-M-Version` must now be `"4.0.02"`, the `version_code` is `"50020126"`, and the package name changed to `com.community.oneroom`.
+*   **Search API Changes:** The old `GET /wefeed-mobile-bff/subject-api/search` endpoint has been completely removed (returns 404). Searches MUST now be sent as `POST` requests to `/wefeed-mobile-bff/subject-api/search` with the JSON body payload containing `{"keyword": "...", "type": 0, "page": 1, "pageSize": 20}`.
+
 ## 1. Client Identity & Headers
 
 The API servers utilize strict header-based filtering to block unauthorized web clients. Native playback and high-fidelity resolution (4K/1080p) require parity with the mobile identity.
@@ -158,6 +163,17 @@ Many regional streams are only served in the HEVC (H.265) compression format, wh
 *   **Browser Error Capture**: The web player registers event listeners to capture fatal codec playback failures (`dashjs.MediaPlayer.events.ERROR` or `Hls.Events.ERROR`).
 *   **Transcode Failover Pipe**: On capture, the player automatically reroutes the stream source to the backend transcoding pipeline: `/play-compat/{id}?season={season}&episode={episode}&quality={quality}`.
 *   **Subprocess Transcoding**: The backend uses an asynchronous `ffmpeg` subprocess to dynamically transcode the HEVC stream into a standard H.264 stream in real-time, allowing browser playback on any device.
+
+### **Phase 5: Anti-Piracy Dummy Video Bypass (v4.0.02+)**
+In newer versions, the API deliberately attempts to trap unofficial clients and scrapers.
+*   **The Trap:** The `/wefeed-mobile-bff/subject-api/play-info` endpoint returns a valid-looking `url` field containing an `.mp4` stream. However, this is actually a fake 21-second "Please update your app" dummy video meant to break unofficial scrapers.
+*   **Discovery Note:** This trap was reverse-engineered by observing a critical discrepancy in the `play-info` API response. The response returned a video `duration` of `1427` seconds (~23 minutes, the exact length of a standard anime episode), but the actual media player only played a 21-second video from the primary `url` field (`https://macdn.aoneroom.com/other/.../b164fbfb43477929...mp4`). The metadata proved the API knew the real video duration but was deliberately serving the wrong file link.
+*   **The Secret Key:** The real streaming information is hidden inside the `signCookie` property within the stream object.
+*   **The Bypass Algorithm:**
+    1.  Parse the `signCookie` string and search for `urlprefix=`.
+    2.  Extract the Base64 encoded string immediately following it. (e.g., `aHR0cHM6Ly9zYmNkbjIuaGFrdW5heW1hdGF0YS5jb20...`)
+    3.  Decode the Base64 string to reveal the hidden base CDN server path (e.g., `https://sbcdn2.hakunaymatata.com/dash/.../`).
+    4.  Append `index.mpd` (for MPEG-DASH streams) or `index.m3u8` (for HLS streams) to the end of that hidden path to construct the true, playable stream manifest URL, entirely ignoring the fake `url` field.
 
 ---
 

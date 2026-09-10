@@ -97,14 +97,14 @@ def get_default_client_info() -> dict:
     device_id = "86820305" + "".join(random.choices("0123456789", k=7))
     
     return {
-        "package_name": "com.community.mbox.in",
-        "version_name": "3.0.16.0804.03",
-        "version_code": 50020116,
+        "package_name": "com.community.oneroom",
+        "version_name": "4.0.02",
+        "version_code": 50020126,
         "os": "android",
         "os_version": "14",
-        "install_ch": "googleplay",
+        "install_ch": "ps",
         "device_id": device_id,
-        "install_store": "googleplay",
+        "install_store": "ps",
         "gaid": "",
         "brand": "Google",
         "model": "Pixel 6",

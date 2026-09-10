@@ -12,8 +12,7 @@ class MovieBoxStream:
         params = {
             "subjectId": subject_id,
             "se": season,
-            "ep": episode,
-            "host": self.client.BASE_URL
+            "ep": episode
         }
         if resource_id:
             params["resourceId"] = resource_id
@@ -23,8 +22,8 @@ class MovieBoxStream:
             "/wefeed-mobile-bff/subject-api/play-info",
             params=params,
             headers={
-                "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 13; SM-S918B Build/TP1A.220624.014)",
-                "X-M-Version": "11.7.0"
+                "User-Agent": "MovieBox/4.0.02 (Android 14; Pixel 6)",
+                "X-M-Version": "4.0.02"
             }
         )
 

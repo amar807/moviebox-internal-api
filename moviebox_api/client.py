@@ -12,7 +12,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class MovieBoxClient:
-    BASE_URL = "https://api.inmoviebox.com"
+    BASE_URL = "https://apig.inmoviebox.com"
 
     def __init__(self, auth: Optional[MovieBoxAuth] = None):
         if auth is None:
@@ -30,9 +30,9 @@ class MovieBoxClient:
     def get_auth_headers(self, timestamp: str) -> Dict[str, str]:
         """Provides consistent headers matching the MovieBox app's security model."""
         headers = {
-            "User-Agent": "MovieBoxPro/16.2.1 (Android 12; Pixel 6)",
+            "User-Agent": "MovieBox/4.0.02 (Android 14; Pixel 6)",
             "Accept": "application/json",
-            "X-M-Version": "16.2.1",
+            "X-M-Version": "4.0.02",
             "Referer": f"{self.BASE_URL}/",
             "X-Sign-Version": "2.0",
             "X-Client-Token": generate_client_token(),
@@ -55,7 +55,7 @@ class MovieBoxClient:
         type: 1 = Register, 2 = Login, 3 = Reset Password
         """
         payload = {
-            "package_name": "com.community.mbox.in",
+            "package_name": "com.community.oneroom",
             "authType": auth_type, # 1=Mail, 0=Phone
             "type": type 
         }
@@ -79,7 +79,7 @@ class MovieBoxClient:
         hashed_pwd = md5_hex(password)
         payload = {
             "password": hashed_pwd,
-            "package_name": "com.community.mbox.in",
+            "package_name": "com.community.oneroom",
             "authType": auth_type,
             "type": 0
         }
@@ -115,7 +115,7 @@ class MovieBoxClient:
         payload = {
             "password": hashed_pwd,
             "verificationCode": otp,
-            "package_name": "com.community.mbox.in",
+            "package_name": "com.community.oneroom",
             "authType": auth_type,
             "type": 1 # For register, type is likely 1
         }
@@ -157,7 +157,7 @@ class MovieBoxClient:
         from .utils import generate_gslb_sign, sha256_hex
         
         # Pin device info for GSLB stability
-        package_name = "com.community.mbox.in"
+        package_name = "com.community.oneroom"
         device_id = "868203051234567" # Match test script
         key = sha256_hex(device_id)
         

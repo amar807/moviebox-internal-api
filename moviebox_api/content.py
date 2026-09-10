@@ -16,9 +16,9 @@ class MovieBoxContent:
     def search(self, keyword: str, page: int = 1, page_size: int = 20) -> Dict:
         """Searches for content based on keyword."""
         return self.client.request(
-            "GET",
+            "POST",
             "/wefeed-mobile-bff/subject-api/search",
-            params={"q": keyword, "page": page, "pageSize": page_size}
+            data={"keyword": keyword, "q": keyword, "page": page, "pageSize": page_size, "type": 0}
         )
 
     def get_movie_detail(self, subject_id: str) -> Dict:
