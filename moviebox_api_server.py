@@ -259,14 +259,36 @@ def map_item(src: dict, depth: int = 0):
             action_type = "category"
             if "categoryType=" in dlink:
                 category_id = dlink.split("categoryType=")[1].split("&")[0]
+                # Only use category_id as sid if item has no real subjectId of its own
+                if not sid or sid == "0":
+                    sid = category_id
         elif "/playlist/detail" in dlink:
             action_type = "playlist"
+            if "playlistId=" in dlink:
+                extracted_id = dlink.split("playlistId=")[1].split("&")[0]
+                if not sid or sid == "0":
+                    sid = extracted_id
         elif "/movie/detail" in dlink:
             action_type = "movie"
+            if "subjectId=" in dlink:
+                extracted_id = dlink.split("subjectId=")[1].split("&")[0]
+                if not sid or sid == "0":
+                    sid = extracted_id
+        elif "/actor/" in dlink:
+            action_type = "actor"
+            if "actorId=" in dlink:
+                extracted_id = dlink.split("actorId=")[1].split("&")[0]
+                if not sid or sid == "0":
+                    sid = extracted_id
+        elif "/post/" in dlink or "detailVideo" in dlink:
+            action_type = "post"
+            if "id=" in dlink:
+                # Extract the post ID from the deepLink
+                extracted_id = dlink.split("id=")[1].split("&")[0]
+                if sid == "0" or not sid:
+                    sid = extracted_id
 
     if title == "Unknown":
-        if action_type == "category" and category_id:
-             title = f"Category {category_id}" # Still unknown, but better than "Unknown"
         pass
     
     poster = item.get("poster")
@@ -356,7 +378,11 @@ def map_item(src: dict, depth: int = 0):
         "description": item.get("description") or "",
         "actionType": action_type,
         "categoryId": category_id,
-        "deepLink": dlink
+        "deepLink": dlink,
+        "isPost": action_type == "post",
+        "streamUrl": item.get("playUrl", {}).get("playUrl") if isinstance(item.get("playUrl"), dict) else None,
+        "isCollection": item.get("isCollection", False),
+        "items": item.get("items", [])
     }
 
 @app.get("/home")
@@ -632,6 +658,18 @@ def get_nollywood(page: int = 1, session_id: Optional[str] = Cookie(None)):
         logger.error(f"Nollywood error: {e}")
         return {"code": 1, "message": str(e), "data": {"list": []}}
 
+@app.get("/tab/{tab_id}")
+def get_tab_generic(tab_id: int, page: int = 1, session_id: Optional[str] = Cookie(None)):
+    s = get_session(session_id)
+    try:
+        res = s["content"].get_categories(category_id=tab_id, page=page)
+        data = res.get("data") or {}
+        items = data.get("list") or data.get("items") or data.get("subjects") or []
+        return {"code": 0, "data": {"list": format_tab_sections(items)}}
+    except Exception as e:
+        logger.error(f"Generic Tab {tab_id} error: {e}")
+        return {"code": 1, "message": str(e), "data": {"list": []}}
+
 @app.get("/game")
 def get_game(page: int = 1, session_id: Optional[str] = Cookie(None)):
     s = get_session(session_id)
@@ -761,20 +799,56 @@ def get_detail(subject_id: str, depth: int = 0, session_id: Optional[str] = Cook
     # 1. Check if it's a category ID (If standard detail fails or has no title)
     if not data or not (data.get("title") or data.get("name")):
         try:
-           # Try as category
-           cat_res = s["content"].get_categories(category_id=subject_id, page=1)
-           cat_data = cat_res.get("data", {})
-           items = cat_data.get("list") or cat_data.get("items") or cat_data.get("subjects") or []
-           if items:
-               is_collection = True
-               # Synthesize a "Movie" object for the collection
+           # Try as post detail first
+           post_res = s["client"].request("GET", "/wefeed-mobile-bff/post/get", params={"postId": subject_id})
+           post_data = post_res.get("data", {})
+           if post_data and post_data.get("postId"):
+               media = post_data.get("media") or {}
+               video_url = ""
+               if media.get("mediaType") == "VIDEO":
+                   video_list = media.get("video") or []
+                   if video_list and len(video_list) > 0:
+                       video_url = video_list[0].get("url") or video_list[0].get("playUrl") or ""
+                   elif media.get("url"):
+                       video_url = media.get("url")
+                       
+               # Synthesize a "Movie" object for the post
                data = {
                    "subjectId": subject_id,
-                   "title": f"Collection {subject_id}",
-                   "isCollection": True,
-                   "items": items
+                   "title": "Community Post",
+                   "description": post_data.get("content") or post_data.get("text") or "",
+                   "isPost": True,
+                   "streamUrl": video_url,
+                   "poster": media.get("cover", {}).get("url") if isinstance(media.get("cover"), dict) else None,
+                   "source": f"@{post_data.get('user', {}).get('nickname', 'User')}"
                }
         except: pass
+
+        if not data or not (data.get("title") or data.get("name")):
+            try:
+               cat_res = s["client"].request(
+                   "POST",
+                   "/wefeed-mobile-bff/subject-api/genre-top",
+                   data={"type": subject_id, "page": 1, "perPage": 50}
+               )
+               cat_data = cat_res.get("data", {})
+               desc = cat_data.get("desc") or "Curated Collection"
+               items = cat_data.get("list") or cat_data.get("items") or cat_data.get("subjects") or []
+               
+               # Unbox nested info objects from genre-top response
+               raw_items = [i.get("info") if isinstance(i, dict) and i.get("info") else i for i in items]
+               mapped_items = [map_item(m) for m in raw_items]
+               if mapped_items:
+                   items = mapped_items  # update outer items variable for collectionItems
+                   is_collection = True
+                   # Synthesize a "Movie" object for the collection
+                   data = {
+                       "subjectId": subject_id,
+                       "title": desc,
+                       "isCollection": True,
+                       "items": mapped_items
+                   }
+            except: pass
 
     if not data: return {"code": 1, "msg": "Not found"}
     
@@ -809,6 +883,12 @@ def get_detail(subject_id: str, depth: int = 0, session_id: Optional[str] = Cook
     mapped = map_item(data, depth=depth)
     mapped["postCount"] = data.get("postCount", "0")
     mapped["isCollection"] = is_collection
+    
+    # Restore synthesized post fields that map_item might have overwritten
+    if data.get("isPost"):
+        mapped["isPost"] = True
+        mapped["streamUrl"] = data.get("streamUrl")
+        mapped["source"] = data.get("source")
     
     if is_collection and depth == 0:
         mapped["collectionItems"] = [map_item(i, depth=depth+1) for i in items[:24]]

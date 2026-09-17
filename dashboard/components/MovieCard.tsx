@@ -50,30 +50,28 @@ export const MovieCard: React.FC<MovieCardProps> = ({ item, onClick, onInfoClick
         </div>
       </div>
       
-      <div className="p-3">
-        {item.title && item.title !== "Unknown" && (
-           <h3 className="text-sm font-semibold text-zinc-100 truncate group-hover:text-red-500 transition-colors">
-              {item.title}
-           </h3>
-        )}
-        <div className="flex items-center gap-2 mt-1">
-            <span className="text-[10px] text-zinc-500 font-medium">
-              {item.title !== "Unknown" && (
-                item.subjectType === 2 ? (
-                  <span className="flex items-center gap-1">
-                    <Tv className="w-2.5 h-2.5 text-red-500" />
-                    Series {item.season && `• S${item.season} E${item.episode || 1}`}
-                  </span>
-                ) : 'Movie'
-              )}
-            </span>
-            {item.title !== "Unknown" && item.releaseTime && (
-              <span className="text-[10px] text-zinc-600">
-                • {item.releaseTime.length > 4 ? new Date(item.releaseTime).getFullYear() : item.releaseTime}
+      {item.title !== "Unknown" && (
+        <div className="p-3">
+          <h3 className="text-sm font-semibold text-zinc-100 truncate group-hover:text-red-500 transition-colors">
+            {item.title}
+          </h3>
+          <div className="flex items-center gap-2 mt-1">
+              <span className="text-[10px] text-zinc-500 font-medium">
+                  {item.subjectType === 2 ? (
+                    <span className="flex items-center gap-1">
+                      <Tv className="w-2.5 h-2.5 text-red-500" />
+                      Series {item.season && `• S${item.season} E${item.episode || 1}`}
+                    </span>
+                  ) : 'Movie'}
               </span>
-            )}
+              {item.releaseTime && (
+                <span className="text-[10px] text-zinc-600">
+                  • {item.releaseTime.length > 4 ? new Date(item.releaseTime).getFullYear() : item.releaseTime}
+                </span>
+              )}
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 };

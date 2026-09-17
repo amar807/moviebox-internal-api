@@ -428,22 +428,26 @@ The application uses a modular category-based system to populate its vertical ta
 *   **Route**: `POST /home/v2/get-list`
 *   **Data Payload**: `{"categoryId": <ID>, "page": <PAGE>, "pageSize": 24}`
 
-### **Category ID Mapping**
-| Section Name | Category ID | Tab Code | Description |
-| :--- | :--- | :--- | :--- |
-| Trending | 1 | Trending | Hot/Popular feed |
-| Movie | 2 | Movie | Feature films |
-| Education | 3 | Education | Courses and tutorials |
-| Music | 4 | Music | Music videos and tracks |
-| TV/Series | 5 | TVshow | Television shows and series |
-| Anime | 8 | Animation | Animation and Anime content |
-| Game | 11 | Game | Gaming related content |
-| ShortTV | 13 | ShortTV_Discover | Short-form vertical video series |
-| Asian | 18 | KDrama | K-Dramas and Asian series |
-| Western | 19 | WesternTv | US/UK and International series |
-| Kids | 23 | Kids | Children's content |
-| Nollywood | 28 | Nollywood | Regional/African content |
-| BuzzBox | 30 | Community | Social community/forum feed |
+### **tabId Mapping**
+| tabId | True Category | Highlights / Raw Sections Found |
+| :--- | :--- | :--- |
+| 0, 1, 6, 10, 27, 30, 31, 35 | 🏠 Main Home / Feed | Banners: Neagley, Haiwaan. Sections: Football Live, Trending Movies, Netflix WWE Live, Top Anime, K-Drama Shorts. |
+| 2, 12, 23 | 🎬 Movies | Bollywood Love Stories, One-Person Army Action, Laugh Out Loud. |
+| 3 | 📚 Education & Kids | Class 9 Maths, NEET Biology, Pre-primary, Kids Cartoon. |
+| 4 | 🎵 Music | Most-Watched Music Videos, Evergreen Bollywood Hits, Pop/HipHop. |
+| 5, 20 | 📺 Indian Web Series | Series In Progress, Indian Firepower, Reality-TV Shows (Bigg Boss). |
+| 7, 13 | 📱 ShortTV | ShortTV deep links (vskit://), Playlists. |
+| 8, 22, 24, 25 | 🎌 Anime | Trending Now (Bleach, JoJo), Anime in Progress. |
+| 9 | 🔞 Adult / 18+ | UllU Drama List, Hentai Anime, Vivamax Movies, Porn Top Videos. |
+| 11 | 🎮 Games | Popular Games 🔥 |
+| 18 | 🌏 Asian Drama | Descendants of the Sun, Our Sticky Love, Girl From Nowhere. |
+| 19 | 🤠 Western TV Series | Reacher, House of the Dragon, The Boys, S.W.A.T. |
+| 28 | 🇳🇬 Nollywood / African | RuthKadiri247, Maurice Sam TV, LizzyGold Tv, IBAKATV. |
+| 32 | 📱 General Shorts | Just a single [SPORT_POST_LIST] called "Shorts". |
+| 33 | 🏅 Sports Shorts | Just a single [SPORT_POST_LIST] called "Sports Shorts Hub". |
+| 37 | 🤼 Wrestling / Combat | WWE Must Watch Matches, Women’s Ring Showdowns. |
+| 38 | 🍳 Cooking / Recipes | Christmas Bites, Recipe Filter, How to make Street Food. |
+| 40 | 🎓 Courses / EdTech | PW Lesson, NEEV 3.0 (Class 9th), Excel Skills for Business. |
 
 ### **Summary of Home Feed Components**
 | Component | Endpoint | Method |

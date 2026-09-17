@@ -36,17 +36,9 @@ export default function MovieBoxDashboard() {
   const [groupLoading, setGroupLoading] = useState(false);
 
   const NAV_ITEMS = [
-    { id: 'home', label: 'Home', icon: Play, api: movieApi.getHome, tabId: 1 },
-    { id: 'movies', label: 'Movies', icon: Film, api: movieApi.getMovies, tabId: 2 },
-    { id: 'anime', label: 'Anime', icon: Zap, api: movieApi.getAnime, tabId: 8 },
-    { id: 'short-tv', label: 'Short TV', icon: Tv, api: movieApi.getShortTv, tabId: 13 },
-    { id: 'kids', label: 'Kids', icon: Star, api: movieApi.getKids, tabId: 23 },
-    { id: 'education', label: 'Education', icon: Info, api: movieApi.getEducation, tabId: 3 },
-    { id: 'music', label: 'Music', icon: Music, api: movieApi.getMusic, tabId: 4 },
-    { id: 'asian', label: 'Asian', icon: Globe, api: movieApi.getAsian, tabId: 18 },
-    { id: 'western', label: 'Western', icon: Map, api: movieApi.getWestern, tabId: 19 },
-    { id: 'nollywood', label: 'Nollywood', icon: Palette, api: movieApi.getNollywood, tabId: 28 },
-    { id: 'game', label: 'Games', icon: Gamepad, api: movieApi.getGame, tabId: 11 },
+    { id: 'home', label: 'Home', icon: Play, api: () => movieApi.getTab(1), tabId: 1 },
+    { id: 'movies', label: 'Movies', icon: Film, api: () => movieApi.getTab(2), tabId: 2 },
+    { id: 'anime', label: 'Anime', icon: Zap, api: () => movieApi.getTab(8), tabId: 8 },
   ];
 
   // Auth State
@@ -217,9 +209,30 @@ export default function MovieBoxDashboard() {
     fetchTabContent('home');
   };
 
-  const openMovie = (movie: MovieItem) => {
+  const openMovie = async (movie: MovieItem, sectionTitle?: string) => {
     const id = movie.subjectId || movie.id;
     if (!id) return;
+    
+    if (movie.isPost && movie.streamUrl) {
+        try {
+            await movieApi.launchPlayer('mpv', movie.streamUrl, {
+               subject_id: id,
+               title: movie.title
+            });
+        } catch (e) {
+            console.error("Failed to launch player for post", e);
+        }
+        return;
+    }
+    // Store metadata in sessionStorage for clean URLs
+    // Use sectionTitle as fallback when movie title is Unknown (category items)
+    const displayTitle = movie.title !== "Unknown" ? movie.title : (sectionTitle || null);
+    if (movie.poster || movie.cover || displayTitle) {
+        sessionStorage.setItem(`meta_${id}`, JSON.stringify({
+            poster: movie.poster || movie.cover,
+            title: displayTitle
+        }));
+    }
     
     // Normal Movie/Series or Collection Navigation
     router.push(`/detail/${id}`);
@@ -361,16 +374,7 @@ export default function MovieBoxDashboard() {
              ))}
            </div>
 
-           <div className="pt-8 border-t border-white/5">
-              <p className="text-[10px] font-black uppercase tracking-[0.3em] text-white/20 mb-4 px-4">Social</p>
-              <button 
-                onClick={() => { alert('Community feed integrated to sections automatically.'); }}
-                className="w-full flex items-center gap-4 px-4 py-3 rounded-2xl text-zinc-500 hover:bg-white/5 hover:text-white transition-all"
-              >
-                <Users className="w-5 h-5" />
-                <span className="text-xs uppercase tracking-widest font-bold">Groups</span>
-              </button>
-           </div>
+
         </aside>
 
         {/* Main Feed Container */}
@@ -543,11 +547,11 @@ export default function MovieBoxDashboard() {
                           </div>
                         ))
                       ) : (
-                        section.items.map((movie: any, i: number) => (
-                          <div key={`${movie.subjectId}-${i}`} className="w-[200px] shrink-0 transform transition-all hover:scale-105 duration-500">
-                             <MovieCard item={movie} onClick={() => openMovie(movie)} />
-                          </div>
-                        ))
+                         section.items.map((movie: any, i: number) => (
+                           <div key={`${movie.subjectId}-${i}`} className="w-[200px] shrink-0 transform transition-all hover:scale-105 duration-500">
+                              <MovieCard item={movie} onClick={() => openMovie(movie, section.title)} />
+                           </div>
+                         ))
                       )}
                     </div>
                   </section>

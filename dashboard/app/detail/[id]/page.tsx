@@ -41,6 +41,14 @@ export default function MovieDetail() {
   const { id } = useParams();
   const router = useRouter();
   const [movie, setMovie] = useState<any>(null);
+  const [metaOverride, setMetaOverride] = useState<any>(null);
+
+  useEffect(() => {
+    try {
+       const stored = sessionStorage.getItem(`meta_${id}`);
+       if (stored) setMetaOverride(JSON.parse(stored));
+    } catch(e) {}
+  }, [id]);
   const [loading, setLoading] = useState(true);
   const [watchlistActive, setWatchlistActive] = useState(false);
   const [seasons, setSeasons] = useState<any[]>([]);
@@ -64,7 +72,7 @@ export default function MovieDetail() {
       const data = res.data;
       setMovie(data);
       
-      if (data.subjectType === 2 || data.isCollection) {
+      if (data.subjectType === 2) {
          const epRes = await movieApi.getEpisodes(id as string);
          const list = epRes.data?.seasons || epRes.data || [];
          setSeasons(list);
@@ -86,30 +94,41 @@ export default function MovieDetail() {
 
   const getStream = async (seasonNum: number, epNum: number|string, qual?: string) => {
      try {
-        const targetId = selectedLanguage?.subjectId || id;
-        const resourceId = selectedLanguage?.id;
+        let streamUrl = "";
+        let cookieStr = "";
+        let durationNum = 0;
         
-        console.log("Resolving Stream for native launch:", targetId, "S", seasonNum, "E", epNum, "Resource:", resourceId);
-        
-        // 1. Pre-resolve the video URL via our high-fidelity resolver API
-        const streamData = await movieApi.getStream(targetId as string, seasonNum || 1, epNum as any || 1, qual, resourceId || undefined);
-        
-        if (!streamData?.url) {
-           console.error("Could not resolve video URL.");
-           return;
+        if (movie?.isPost && movie?.streamUrl) {
+           streamUrl = movie.streamUrl;
+        } else {
+            const targetId = selectedLanguage?.subjectId || id;
+            const resourceId = selectedLanguage?.id;
+            
+            console.log("Resolving Stream for native launch:", targetId, "S", seasonNum, "E", epNum, "Resource:", resourceId);
+            
+            // 1. Pre-resolve the video URL via our high-fidelity resolver API
+            const streamData = await movieApi.getStream(targetId as string, seasonNum || 1, epNum as any || 1, qual, resourceId || undefined);
+            
+            if (!streamData?.url) {
+               console.error("Could not resolve video URL.");
+               return;
+            }
+            streamUrl = streamData.url;
+            cookieStr = streamData.cookie;
+            durationNum = streamData.duration;
         }
 
-        console.log("Launching MPV with resolved URL:", streamData.url.substring(0, 50) + "...");
+        console.log("Launching MPV with resolved URL:", streamUrl.substring(0, 50) + "...");
         
         // 2. Pass the RAW VIDEO URL to the backend launcher
-        await movieApi.launchPlayer('mpv', streamData.url, {
+        await movieApi.launchPlayer('mpv', streamUrl, {
            subject_id: selectedLanguage?.subjectId || id,
            resource_id: selectedLanguage?.id,
            season: seasonNum || 1,
            episode: epNum || 1,
            title: movie?.title,
-           cookie: streamData.cookie,
-           duration: streamData.duration
+           cookie: cookieStr,
+           duration: durationNum
         });
      } catch (e) {
         console.error("MPV Launch error:", e);
@@ -162,7 +181,7 @@ export default function MovieDetail() {
 
         <div className="flex flex-col lg:flex-row gap-12 items-start mb-20">
           <div className="w-full max-w-[320px] shrink-0 mx-auto lg:mx-0 shadow-2xl shadow-red-900/40 rounded-3xl overflow-hidden border border-white/10 group relative">
-             <img src={movie.poster || movie.cover} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" />
+             <img src={movie.poster || movie.cover || metaOverride?.poster} className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" />
              <div className="absolute inset-0 bg-gradient-to-t from-black/80 to-transparent" />
              {movie.score && movie.score !== 'N/A' && (
                 <div className="absolute bottom-4 left-4 flex items-center gap-2 bg-yellow-500 text-black px-3 py-1 rounded-lg font-black italic tracking-tighter shadow-lg">
@@ -173,20 +192,22 @@ export default function MovieDetail() {
           </div>
 
           <div className="flex-1 max-w-3xl">
-             <div className="flex flex-wrap items-center gap-3 mb-6">
-                <span className="px-3 py-1 bg-red-600 rounded-md text-[10px] font-black uppercase tracking-[0.2em] italic shadow-lg shadow-red-600/20">
-                   {movie.subjectType === 2 ? 'TV Series' : 'Movie'}
-                </span>
-                {movie.quality && (
-                  <span className="px-3 py-1 bg-white/10 backdrop-blur-md rounded-md text-[10px] font-bold text-zinc-300 uppercase tracking-widest border border-white/10">
-                    {movie.quality}
+             {!movie.isCollection && (
+               <div className="flex flex-wrap items-center gap-3 mb-6">
+                  <span className="px-3 py-1 bg-red-600 rounded-md text-[10px] font-black uppercase tracking-[0.2em] italic shadow-lg shadow-red-600/20">
+                     {movie.subjectType === 2 ? 'TV Series' : 'Movie'}
                   </span>
-                )}
-                <span className="text-sm font-bold text-zinc-400">{movie.releaseTime?.substring(0, 4)}</span>
-             </div>
+                  {movie.quality && (
+                    <span className="px-3 py-1 bg-white/10 backdrop-blur-md rounded-md text-[10px] font-bold text-zinc-300 uppercase tracking-widest border border-white/10">
+                      {movie.quality}
+                    </span>
+                  )}
+                  <span className="text-sm font-bold text-zinc-400">{movie.releaseTime?.substring(0, 4)}</span>
+               </div>
+             )}
 
              <h1 className="text-5xl md:text-7xl font-black italic uppercase tracking-tighter mb-6 leading-none text-white drop-shadow-2xl">
-                {movie.title}
+                {(movie.title && movie.title !== 'Unknown') ? movie.title : metaOverride?.title}
              </h1>
 
              <p className="text-lg md:text-xl text-zinc-400 leading-relaxed max-w-2xl font-medium mb-10 [text-wrap:balance]">
@@ -225,20 +246,22 @@ export default function MovieDetail() {
                 </div>
              )}
 
-             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                {[
-                   { icon: Clock, label: 'Duration', value: movie.duration || 'N/A' },
-                   { icon: Calendar, label: 'Released', value: movie.releaseTime || 'N/A' },
-                   { icon: Languages, label: 'Language', value: movie.language || 'Multi' },
-                   { icon: Film, label: 'Source', value: movie.source || 'Premium' }
-                ].map((item, i) => (
-                   <div key={i} className="p-4 bg-white/5 rounded-2xl border border-white/5 backdrop-blur-md">
-                      <item.icon className="w-5 h-5 text-red-500 mb-2" />
-                      <div className="text-[10px] uppercase font-bold text-zinc-500 tracking-widest leading-none mb-1">{item.label}</div>
-                      <div className="text-sm font-bold truncate">{item.value}</div>
-                   </div>
-                ))}
-             </div>
+             {!movie.isCollection && (
+               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  {[
+                     { icon: Clock, label: 'Duration', value: movie.duration || 'N/A' },
+                     { icon: Calendar, label: 'Released', value: movie.releaseTime || 'N/A' },
+                     { icon: Languages, label: 'Language', value: movie.language || 'Multi' },
+                     { icon: Film, label: 'Source', value: movie.source || 'Premium' }
+                  ].map((item, i) => (
+                     <div key={i} className="p-4 bg-white/5 rounded-2xl border border-white/5 backdrop-blur-md">
+                        <item.icon className="w-5 h-5 text-red-500 mb-2" />
+                        <div className="text-[10px] uppercase font-bold text-zinc-500 tracking-widest leading-none mb-1">{item.label}</div>
+                        <div className="text-sm font-bold truncate">{item.value}</div>
+                     </div>
+                  ))}
+               </div>
+             )}
           </div>
         </div>
 
@@ -309,9 +332,9 @@ export default function MovieDetail() {
         )}
 
         {/* Collection Grid Fallback */}
-        {movie.isCollection && movie.collectionItems && (
+        {movie.isCollection && (
            <div className="mb-20">
-              <CollectionGrid items={movie.collectionItems} />
+              <CollectionGrid items={movie.items?.length ? movie.items : (movie.collectionItems || [])} />
            </div>
         )}
       </div>

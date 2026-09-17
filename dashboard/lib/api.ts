@@ -23,6 +23,8 @@ export interface MovieItem {
   status?: number;
   season?: number;
   episode?: number;
+  isPost?: boolean;
+  streamUrl?: string;
   actionType?: string;
   categoryId?: string;
 }
@@ -141,6 +143,10 @@ export const movieApi = {
   },
   getGame: async (page = 1) => {
     const res = await api.get('/game', { params: { page } });
+    return res.data;
+  },
+  getTab: async (tabId: number, page = 1) => {
+    const res = await api.get(`/tab/${tabId}`, { params: { page } });
     return res.data;
   },
   getSearchSuggestions: async (q?: string) => {
