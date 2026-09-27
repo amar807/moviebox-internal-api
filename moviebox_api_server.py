@@ -1001,24 +1001,91 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
     logger.info(f"PLAY-INFO RAW RESPONSE: {res}")
     streams = data.get("streamList") or data.get("streams") or []
     
-    # OVERRIDE DUMMY URL WITH URLPREFIX DECODE
+    # ============================================================
+    # ANTI-PIRACY BYPASS (v4.0.02+ 21-second dummy video trap)
+    # Official API sometimes returns a fake ~21s "update your app"
+    # MP4 in the `url` field. Real CDN path is Base64-hidden inside
+    # signCookie as urlprefix=...
+    # ============================================================
     import base64
     import re
+
+    DUMMY_URL_MARKERS = (
+        "macdn.aoneroom.com/other/",
+        "macdn.aoneroom.com/promo/",
+        "aoneroom.com/other/",
+        "/please_update",
+        "/update_app",
+        "b164fbfb43477929",  # known dummy hash from docs
+    )
+
+    def _is_dummy_url(url: str) -> bool:
+        if not url:
+            return True
+        u = url.lower()
+        return any(m in u for m in DUMMY_URL_MARKERS)
+
+    def _decode_urlprefix(cookie_str: str):
+        """Extract real CDN base path from signCookie urlprefix= Base64 value."""
+        if not cookie_str or "urlprefix=" not in str(cookie_str):
+            return None
+        match = re.search(r"urlprefix=([^:;\s]+)", str(cookie_str))
+        if not match:
+            return None
+        b64_prefix = match.group(1).strip()
+        b64_prefix += "=" * ((4 - len(b64_prefix) % 4) % 4)
+        try:
+            prefix_url = base64.b64decode(b64_prefix).decode("utf-8")
+            if prefix_url.startswith("http"):
+                return prefix_url if prefix_url.endswith("/") else prefix_url + "/"
+        except Exception as e:
+            logger.error(f"URLPREFIX decode error: {e}")
+        return None
+
+    def _build_real_manifest(prefix: str, prefer_hls: bool = False) -> str:
+        """Append correct manifest. Path hints: /dash/ -> mpd, /hls/ -> m3u8."""
+        p = prefix.lower()
+        if prefer_hls or "/hls/" in p or "m3u8" in p:
+            return prefix + "index.m3u8"
+        return prefix + "index.mpd"
+
+    def _apply_urlprefix_bypass(stream_obj: dict, extra_cookies=None) -> bool:
+        """Mutate stream_obj['url'] if a real prefix is found. Returns True if rewritten."""
+        if not isinstance(stream_obj, dict):
+            return False
+        candidates = [
+            stream_obj.get("signCookie") or "",
+            stream_obj.get("cookie") or "",
+        ]
+        if extra_cookies:
+            candidates.extend([c or "" for c in extra_cookies])
+        for sc in candidates:
+            prefix = _decode_urlprefix(sc)
+            if prefix:
+                orig = (stream_obj.get("url") or "").lower()
+                prefer_hls = ".m3u8" in orig or "/hls/" in orig
+                real = _build_real_manifest(prefix, prefer_hls=prefer_hls)
+                old = stream_obj.get("url")
+                stream_obj["url"] = real
+                stream_obj["_bypassed_dummy"] = True
+                logger.info(f"ANTI-PIRACY BYPASS: {old} -> {real}")
+                return True
+        return False
+
+    # Global cookies that may carry urlprefix
+    _global_sc_candidates = [
+        res.get("signCookie"),
+        data.get("signCookie"),
+        s["client"].session.cookies.get("signCookie"),
+        (s.get("auth") and getattr(s["auth"], "token", None)) or None,
+    ]
+
+    # Rewrite every stream that has (or inherits) a urlprefix
     for _st in streams:
-        _sc = _st.get("signCookie", "")
-        if "urlprefix=" in _sc:
-            match = re.search(r'urlprefix=([^:]+)', _sc)
-            if match:
-                b64_prefix = match.group(1)
-                b64_prefix += "=" * ((4 - len(b64_prefix) % 4) % 4)
-                try:
-                    prefix_url = base64.b64decode(b64_prefix).decode('utf-8')
-                    if prefix_url.startswith("http"):
-                        # MovieBox Dash/HLS streams use index.mpd for DASH streams
-                        _st["url"] = prefix_url + "index.mpd"
-                        logger.info(f"ANTI-PIRACY BYPASS: Decoded real URL -> {_st['url']}")
-                except Exception as e:
-                    logger.error(f"URLPREFIX decode error: {e}")
+        _apply_urlprefix_bypass(_st, extra_cookies=_global_sc_candidates)
+        if _is_dummy_url(_st.get("url", "")):
+            _st["_is_dummy"] = True
+            logger.warning(f"DUMMY/TRAP URL detected (no urlprefix): {_st.get('url', '')[:120]}")
     
     # Fallback to resourceDetectors inside movie/show detail if no streams found in play-info
     if not streams:
@@ -1070,17 +1137,26 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
     
     def prioritize_h264(st):
         u = st.get("url", "").lower()
-        if "h265" in u or "x265" in u or "hev1" in u: return 10 # Very low priority
-        if ".mp4" in u: return 0  # Highest priority
-        if ".m3u8" in u: return 1 # Good priority
-        return 5 # DASH is risky but better than H265
+        # Never prefer the 21s anti-scraper dummy
+        if st.get("_is_dummy") or _is_dummy_url(u):
+            return 100
+        if "h265" in u or "x265" in u or "hev1" in u:
+            return 10  # Very low priority
+        if ".mp4" in u:
+            return 0  # Highest priority
+        if ".m3u8" in u:
+            return 1  # Good priority
+        if ".mpd" in u or "/dash/" in u:
+            return 2  # Real DASH after bypass
+        return 5
     
     prioritized_streams = sorted(streams, key=prioritize_h264)
 
-    # Pass 1: Try to find a playable non-HEVC stream
+    # Pass 1: Try to find a playable non-HEVC, non-dummy stream
     for st in prioritized_streams:
         url = st.get("url")
-        if not url: continue
+        if not url or st.get("_is_dummy") or _is_dummy_url(url):
+            continue
         if any(bad in url.lower() for bad in ["h265", "x265", "hev1"]):
             continue
         cookie = st.get("signCookie") or global_cookie or ""
@@ -1090,13 +1166,15 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
                 working_stream = st
                 working_cookie = cookie
                 break
-        except: continue
+        except:
+            continue
 
     # Pass 2: Fallback to playable HEVC stream if no non-HEVC stream is available
     if not working_stream:
         for st in prioritized_streams:
             url = st.get("url")
-            if not url: continue
+            if not url or st.get("_is_dummy") or _is_dummy_url(url):
+                continue
             cookie = st.get("signCookie") or global_cookie or ""
             try:
                 head_res = requests.head(url, headers={"User-Agent": "ExoPlayerLib/2.18.7", "Cookie": cookie}, timeout=3, verify=False)
@@ -1105,7 +1183,8 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
                     working_stream = st
                     working_cookie = cookie
                     break
-            except: continue
+            except:
+                continue
     subtitles_source = data.get("subTitleList", [])
     
     # PROIRITY: Resource Mirrors (UGC/Dubs like eyosi_as_iam)
@@ -1166,7 +1245,19 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
 
                 logger.info(f"Probe {r_id} Result: {len(p_streams)} streams recovered")
                 if p_streams:
-                    working_stream = p_streams[0]
+                    # Apply anti-piracy bypass on every recovered stream
+                    for _ps in p_streams:
+                        _apply_urlprefix_bypass(
+                            _ps,
+                            extra_cookies=[
+                                p_info.get("signCookie"),
+                                p_data.get("signCookie"),
+                                global_cookie,
+                            ] + list(_global_sc_candidates or []),
+                        )
+                    # Prefer non-dummy
+                    non_dummy_ps = [x for x in p_streams if not _is_dummy_url(x.get("url", ""))]
+                    working_stream = non_dummy_ps[0] if non_dummy_ps else p_streams[0]
                     
                     # PROACTIVE PING: Force a session handshake with the media CDN
                     if "hakunaymatata" in working_stream.get("url", ""):
@@ -1260,9 +1351,19 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
                 if not srcs and fb_data.get('url'): srcs = [fb_data]
                 
                 for cand in srcs:
-                    url = cand.get('url')
-                    if not url: continue
-                    cookie = cand.get('signCookie') or fb_res.get('signCookie') or fb_data.get('signCookie') or s["client"].session.cookies.get("signCookie") or global_cookie or ""
+                    # Apply same anti-piracy rewrite on cluster candidates
+                    _apply_urlprefix_bypass(
+                        cand,
+                        extra_cookies=[
+                            fb_res.get("signCookie"),
+                            fb_data.get("signCookie"),
+                            global_cookie,
+                        ] + list(_global_sc_candidates or []),
+                    )
+                    url = cand.get("url")
+                    if not url or _is_dummy_url(url):
+                        continue
+                    cookie = cand.get("signCookie") or fb_res.get("signCookie") or fb_data.get("signCookie") or s["client"].session.cookies.get("signCookie") or global_cookie or ""
                     try:
                         v_res = requests.head(url, headers={"User-Agent": "ExoPlayerLib/2.18.7", "Cookie": cookie}, timeout=3, verify=False)
                         if v_res.status_code in [200, 206]:
@@ -1271,7 +1372,8 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
                             subtitles_source = fb_data.get("subTitleList", []) or subtitles_source
                             logger.info(f"CLUSTER SUCCESS: Recovered stream via {cluster_url} Cluster")
                             break
-                    except: continue
+                    except:
+                        continue
                 if working_stream: break
             except Exception as e:
                 logger.warning(f"Cluster {cluster_url} failed: {e}")
@@ -1279,12 +1381,24 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
                 s["client"].BASE_URL = orig_base
     
     if not working_stream and streams:
-        working_stream = streams[0]
+        # Prefer any non-dummy stream if available
+        non_dummy = [st for st in streams if not st.get("_is_dummy") and not _is_dummy_url(st.get("url", ""))]
+        working_stream = non_dummy[0] if non_dummy else streams[0]
         working_cookie = working_stream.get("signCookie") or global_cookie or ""
 
     if not working_stream:
         logger.error(f"RESOLUTION FAILURE: No usable streams found for subject {subject_id}")
         raise HTTPException(status_code=404, detail="No streams found.")
+
+    # FINAL SAFETY: if selected stream is still the 21s trap, force urlprefix rewrite
+    if working_stream and (_is_dummy_url(working_stream.get("url", "")) or working_stream.get("_is_dummy")):
+        logger.warning("Selected stream still looks like 21s dummy — forcing urlprefix bypass")
+        _apply_urlprefix_bypass(
+            working_stream,
+            extra_cookies=[working_cookie, global_cookie] + list(_global_sc_candidates or []),
+        )
+        if _is_dummy_url(working_stream.get("url", "")):
+            logger.error(f"Could not escape dummy URL for {subject_id}: {working_stream.get('url')}")
 
     # CALCULATE METADATA DURATION FOR FRONTEND OVERRIDE
     total_duration = 0
