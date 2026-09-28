@@ -936,6 +936,57 @@ def get_detail(subject_id: str, depth: int = 0, session_id: Optional[str] = Cook
 @app.get("/episodes/{series_id}")
 def get_episodes(series_id: str, session_id: Optional[str] = Cookie(None)):
     s = get_session(session_id)
+
+    # Short drama (subjectType 7): episodes live under shorts/mini-list
+    try:
+        detail = s["content"].get_movie_detail(series_id).get("data") or {}
+        stype = str(detail.get("subjectType") or detail.get("type") or "")
+    except Exception:
+        stype = ""
+
+    if stype == "7":
+        try:
+            all_eps = []
+            page = 1
+            while page <= 30:
+                ml = s["client"].request(
+                    "GET",
+                    "/wefeed-mobile-bff/shorts/mini-list",
+                    params={"subjectId": series_id, "page": page, "pageSize": 50},
+                )
+                items = (ml.get("data") or {}).get("items") or (ml.get("data") or {}).get("list") or []
+                if not items:
+                    break
+                for it in items:
+                    en = it.get("ep") or it.get("episode")
+                    se_n = it.get("se") or it.get("season") or 1
+                    if en is None:
+                        continue
+                    all_eps.append({
+                        "episodeNumber": str(en),
+                        "seasonNumber": int(se_n),
+                        "title": it.get("title") or f"Episode {en}",
+                        "id": str(it.get("miniId") or f"{series_id}_{se_n}_{en}"),
+                        "duration": ((it.get("video") or {}).get("videoAddress") or {}).get("duration"),
+                    })
+                pager = (ml.get("data") or {}).get("pager") or {}
+                if not pager.get("hasMore"):
+                    break
+                page += 1
+
+            if all_eps:
+                # Group by season
+                by_se = {}
+                for e in all_eps:
+                    by_se.setdefault(e["seasonNumber"], []).append(e)
+                mapped = [
+                    {"seasonNumber": se, "episodes": sorted(eps, key=lambda x: int(x["episodeNumber"]))}
+                    for se, eps in sorted(by_se.items())
+                ]
+                return {"code": 0, "data": {"seasons": mapped}}
+        except Exception as e:
+            logger.warning(f"Short-drama episodes fallback failed: {e}")
+
     res = s["content"].get_episode_list(series_id)
     logger.info(f"EPISODES CLOUD RAW: {json.dumps(res)[:2000]}")
     data = res.get("data") or {}
@@ -984,12 +1035,112 @@ def get_episodes(series_id: str, session_id: Optional[str] = Cookie(None)):
 def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Optional[str] = "720p", resource_id: Optional[str] = None, session_id: Optional[str] = Cookie(None)):
     s = get_session(session_id)
     # 0. Detect subject type to avoid se/ep for movies
+    subject_detail = {}
+    subject_type = None
     try:
         subject_detail = s["content"].get_movie_detail(subject_id).get("data") or {}
-        is_movie = (str(subject_detail.get("subjectType") or subject_detail.get("type")) == "1")
-    except: is_movie = False
+        subject_type = str(subject_detail.get("subjectType") or subject_detail.get("type") or "")
+        is_movie = subject_type == "1"
+    except:
+        is_movie = False
 
-    logger.info(f"RESOLVING STREAM: ID={subject_id} Type={'Movie' if is_movie else 'Series'} Resource={resource_id}")
+    # subjectType 7 = Short Drama (kuku-short). play-info returns ONLY the 21s dummy
+    # with empty signCookie. Real MP4s come from shorts/mini-list or shorts/get-info.
+    is_short_drama = subject_type == "7"
+
+    logger.info(f"RESOLVING STREAM: ID={subject_id} Type={'Movie' if is_movie else ('ShortDrama' if is_short_drama else 'Series')} Resource={resource_id}")
+
+    def _resolve_short_drama_stream(sid: str, se: int, ep: int, q: Optional[str]):
+        """Fetch real kuku-short CDN URLs for short dramas (subjectType 7)."""
+        try:
+            # Page through mini-list until we find the requested episode
+            page = 1
+            target = None
+            while page <= 20:
+                ml = s["client"].request(
+                    "GET",
+                    "/wefeed-mobile-bff/shorts/mini-list",
+                    params={"subjectId": sid, "page": page, "pageSize": 50, "se": se},
+                )
+                items = (ml.get("data") or {}).get("items") or (ml.get("data") or {}).get("list") or []
+                if not items:
+                    break
+                for it in items:
+                    if int(it.get("ep") or it.get("episode") or 0) == int(ep) and int(it.get("se") or it.get("season") or 1) == int(se):
+                        target = it
+                        break
+                if target:
+                    break
+                pager = (ml.get("data") or {}).get("pager") or {}
+                if not pager.get("hasMore"):
+                    break
+                page += 1
+
+            if not target:
+                # Fallback: first episode from get-info
+                info = s["client"].request("GET", "/wefeed-mobile-bff/shorts/get-info", params={"subjectId": sid})
+                target = (info.get("data") or {}).get("firstEp")
+
+            if not target:
+                return None
+
+            video = target.get("video") or {}
+            address_list = video.get("addressList") or []
+            primary = video.get("videoAddress") or {}
+
+            # Build quality-ranked candidates from addressList + primary
+            candidates = []
+            for addr in address_list:
+                if isinstance(addr, dict) and addr.get("url"):
+                    candidates.append(addr)
+            if primary.get("url"):
+                candidates.append(primary)
+
+            if not candidates:
+                return None
+
+            # Prefer requested quality (e.g. 720p), else highest resolution
+            q_num = "".join(filter(str.isdigit, str(q or "720"))) or "720"
+
+            def rank(addr):
+                res = str(addr.get("resolution") or "0")
+                res_n = int("".join(filter(str.isdigit, res)) or 0)
+                # closer to requested quality is better; slight bias to higher if tie
+                return (abs(res_n - int(q_num)), -res_n)
+
+            candidates.sort(key=rank)
+            best = candidates[0]
+            url = best.get("url")
+            if not url or "macdn.aoneroom.com/other" in url:
+                return None
+
+            duration = int(best.get("duration") or primary.get("duration") or 0)
+            res_label = f"{best.get('resolution') or q_num}p"
+            logger.info(f"SHORT-DRAMA STREAM: S{se}E{ep} -> {url[:80]}... ({res_label}, {duration}s)")
+            return {
+                "url": url,
+                "quality": res_label,
+                "cookie": "",
+                "headers": {"User-Agent": "ExoPlayerLib/2.18.7"},
+                "subtitles": [],
+                "subtitle_url": None,
+                "isHls": False,
+                "streamId": target.get("videoId") or target.get("miniId"),
+                "qualityList": list({f"{a.get('resolution')}p" for a in candidates if a.get("resolution")}),
+                "duration": duration if duration > 0 else 0,
+                "episode": ep,
+                "season": se,
+            }
+        except Exception as e:
+            logger.warning(f"Short-drama resolve failed: {e}")
+            return None
+
+    # Fast path for short dramas
+    if is_short_drama:
+        short_res = _resolve_short_drama_stream(subject_id, season, episode, quality)
+        if short_res and short_res.get("url"):
+            return short_res
+        logger.warning("Short-drama fast path failed; falling through to play-info")
     
     # If it's a movie, se and ep MUST be None for the official play-info API to respond correctly in some regions
     res_se = None if is_movie else season
@@ -1398,6 +1549,11 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
             extra_cookies=[working_cookie, global_cookie] + list(_global_sc_candidates or []),
         )
         if _is_dummy_url(working_stream.get("url", "")):
+            # Last resort: try short-drama (kuku-short) resolver even if type detection missed
+            logger.warning(f"urlprefix failed for {subject_id}; trying shorts/mini-list fallback")
+            short_res = _resolve_short_drama_stream(subject_id, season, episode, quality)
+            if short_res and short_res.get("url") and not _is_dummy_url(short_res["url"]):
+                return short_res
             logger.error(f"Could not escape dummy URL for {subject_id}: {working_stream.get('url')}")
 
     # CALCULATE METADATA DURATION FOR FRONTEND OVERRIDE
