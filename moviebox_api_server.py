@@ -73,13 +73,30 @@ def save_local_history(h: dict):
     except Exception as e:
         logger.error(f"Failed to save local history: {e}")
 
+# Shared guest session — avoids creating a new session (+ bootstrap) on every request.
+# Caps memory on free Render instances.
+_SHARED_GUEST_ID = "guest-shared"
+_MAX_SESSIONS = 30
+
 def get_session(session_id: Optional[str] = None):
-    # Check if session exists
+    # Reuse existing session when cookie present
     if session_id and session_id in sessions:
         return sessions[session_id]
-        
-    # Create new session
-    sid = str(uuid.uuid4())
+
+    # Default: one shared guest session for all anonymous traffic
+    if not session_id and _SHARED_GUEST_ID in sessions:
+        return sessions[_SHARED_GUEST_ID]
+
+    # Evict oldest non-shared sessions if over cap (RAM guard)
+    if len(sessions) >= _MAX_SESSIONS:
+        for k in list(sessions.keys()):
+            if k == _SHARED_GUEST_ID:
+                continue
+            del sessions[k]
+            if len(sessions) < _MAX_SESSIONS:
+                break
+
+    sid = session_id or _SHARED_GUEST_ID
     auth = MovieBoxAuth()
     client = MovieBoxClient(auth=auth)
     sessions[sid] = {
@@ -90,27 +107,19 @@ def get_session(session_id: Optional[str] = None):
         "stream": MovieBoxStream(client),
         "user": MovieBoxUser(client)
     }
-    logger.info(f"Created new session: {sid}")
-    
-    # Bootstrap fresh guest credentials by calling a public endpoint
+    logger.info(f"Created session: {sid} (total={len(sessions)})")
+
     try:
-        logger.info(f"Bootstrapping guest credentials for session {sid}...")
-        # X-Client-Status 1 forces guest token allocation from x-user response header
         auth.is_logged_in = False
-        res = MovieBoxContent(client).get_categories(category_id=1, page=1)
-        # Scan response headers for x-user guest token in the client interceptor response update
-        for k, v in client.session.headers.items():
-            pass # client.session has updated or the client's auth object has updated
-        # Ensure we toggle auth.is_logged_in back to True (which uses Authorization: Bearer <Token>)
-        # so that details/play-info endpoints can use the bearer token
-        if auth.token and auth.token != "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjcwNjU5NDg0MTAyMTM4MTYyMzIsInV0cCI6MSwiZXhwIjoxNzkxNzMyMjMzLCJpYXQiOjE3ODM5NTU5MzN9.7iyEzTj4vWAbOF0oXwNnZ0p3Nc1QaO6K9eMiGFyVfGs":
-            logger.info(f"Bootstrap guest token success: {auth.token[:30]}... UID: {auth.user_id}")
+        MovieBoxContent(client).get_categories(category_id=1, page=1)
+        if auth.token and len(auth.token) > 40:
+            logger.info(f"Bootstrap guest token ok: {auth.token[:28]}... UID: {auth.user_id}")
             auth.is_logged_in = True
         else:
             logger.warning("Bootstrap guest token did not update credentials.")
     except Exception as e:
         logger.error(f"Failed to bootstrap guest session: {e}")
-        
+
     return sessions[sid]
 
 class LoginRequest(BaseModel):
@@ -730,7 +739,7 @@ def search(response: Response, q: str, page: int = 1, session_id: Optional[str] 
         if not q.strip():
             return {"code": 0, "data": {"items": []}}
         res = s["content"].search(q.strip(), page=page)
-        logger.info(f"SEARCH RAW ({q}): {json.dumps(res, default=str)[:2000]}")
+        logger.info(f"SEARCH ok q={q!r} items≈{len(_extract_items(res))}")
         items = _extract_items(res)
         return {"code": 0, "data": {"items": [map_item(i) for i in items[:40] if isinstance(i, dict)]}}
     except Exception as e:
@@ -1124,7 +1133,10 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
                 "headers": {"User-Agent": "ExoPlayerLib/2.18.7"},
                 "subtitles": [],
                 "subtitle_url": None,
-                "isHls": False,
+                "isHls": ".m3u8" in url.lower(),
+                "isDash": ".mpd" in url.lower(),
+                "useProxy": False,
+                "cdnDirect": True,
                 "streamId": target.get("videoId") or target.get("miniId"),
                 "qualityList": list({f"{a.get('resolution')}p" for a in candidates if a.get("resolution")}),
                 "duration": duration if duration > 0 else 0,
@@ -1149,8 +1161,8 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
 
     res = s["stream"].get_play_info(subject_id, season=res_se, episode=res_ep, resource_id=resource_id)
     data = res.get("data", {})
-    logger.info(f"PLAY-INFO RAW RESPONSE: {res}")
     streams = data.get("streamList") or data.get("streams") or []
+    logger.info(f"PLAY-INFO ok id={subject_id} se={res_se} ep={res_ep} streams={len(streams)}")
     
     # ============================================================
     # ANTI-PIRACY BYPASS (v4.0.02+ 21-second dummy video trap)
@@ -1194,11 +1206,14 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
         return None
 
     def _build_real_manifest(prefix: str, prefer_hls: bool = False) -> str:
-        """Append correct manifest. Path hints: /dash/ -> mpd, /hls/ -> m3u8."""
+        """Append manifest. Prefer HLS when path allows — smoother on mobile/series."""
         p = prefix.lower()
         if prefer_hls or "/hls/" in p or "m3u8" in p:
             return prefix + "index.m3u8"
-        return prefix + "index.mpd"
+        if "/dash/" in p:
+            return prefix + "index.mpd"
+        # Unknown path: try HLS first (better browser/Android support than DASH)
+        return prefix + "index.m3u8"
 
     def _apply_urlprefix_bypass(stream_obj: dict, extra_cookies=None) -> bool:
         """Mutate stream_obj['url'] if a real prefix is found. Returns True if rewritten."""
@@ -1270,72 +1285,84 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
             logger.error(f"Error extracting from resourceDetectors: {e}")
             
     # signCookie can be in root, in data, or in the session cookies
-    # FALLBACK: If all else fails, the signCookie is often just the user token
     global_cookie = res.get("signCookie") or data.get("signCookie") or s["client"].session.cookies.get("signCookie") or s["auth"].token
-    logger.info(f"Phase 1 - Primary Result: {len(streams)} streams found (code: {res.get('code')}) (Cookie: {'YES' if global_cookie else 'NO'})")
+    logger.info(f"Phase 1 - streams={len(streams)} cookie={'YES' if global_cookie else 'NO'}")
     import requests
-    
-    # Silent Failover Logic - Mobile Handshake Enforcement
+
     working_stream = None
     working_cookie = None
-    
-    # Normalize quality for official API (expects lowercase)
-    official_quality = quality.lower() if quality else "720p"
-    
-    # Try current stream list first (Strict Codec Enforcement)
-    # Browsers generally FAIL to play H.265 (HEVC) or complex HEV1 DASH manifests.
-    # We strictly prioritize H.264 (AVC) MP4 > HLS > (Anything else).
-    
-    def prioritize_h264(st):
-        u = st.get("url", "").lower()
-        # Never prefer the 21s anti-scraper dummy
-        if st.get("_is_dummy") or _is_dummy_url(u):
-            return 100
-        if "h265" in u or "x265" in u or "hev1" in u:
-            return 10  # Very low priority
-        if ".mp4" in u:
-            return 0  # Highest priority
-        if ".m3u8" in u:
-            return 1  # Good priority
-        if ".mpd" in u or "/dash/" in u:
-            return 2  # Real DASH after bypass
-        return 5
-    
-    prioritized_streams = sorted(streams, key=prioritize_h264)
+    official_quality = (quality or "720p").lower()
+    q_num = int("".join(filter(str.isdigit, official_quality)) or "720")
 
-    # Pass 1: Try to find a playable non-HEVC, non-dummy stream
+    # Trusted MovieBox CDNs — no HEAD probe (faster resolve, less RAM/timeouts)
+    TRUSTED_CDN = (
+        "hakunaymatata.com",
+        "msacdn.",
+        "macdn.hakunaymatata",
+        "sbcdn.",
+        "pbcdn.",
+    )
+
+    def _is_trusted_cdn(url: str) -> bool:
+        u = (url or "").lower()
+        return any(t in u for t in TRUSTED_CDN)
+
+    def prioritize_stream(st):
+        """Lower score = better. Prefer direct CDN MP4/HLS, match quality, avoid H.265/dummy."""
+        u = (st.get("url") or "").lower()
+        if st.get("_is_dummy") or _is_dummy_url(u):
+            return 1000
+        score = 0
+        # Codec / container (series stutter: H.265 + heavy DASH)
+        if "h265" in u or "x265" in u or "hev1" in u or "hevc" in u:
+            score += 80
+        if ".mp4" in u and "m3u8" not in u and ".mpd" not in u:
+            score += 0  # best for mobile / series
+        elif ".m3u8" in u or "/hls/" in u:
+            score += 10
+        elif ".mpd" in u or "/dash/" in u:
+            score += 25
+        else:
+            score += 40
+        # Quality closeness to request
+        res_label = str(st.get("quality") or st.get("resolution") or "")
+        res_n = int("".join(filter(str.isdigit, res_label)) or "0")
+        if res_n:
+            score += min(abs(res_n - q_num), 200) // 10
+        # Prefer known CDN hosts
+        if not _is_trusted_cdn(u):
+            score += 15
+        if st.get("_bypassed_dummy"):
+            score -= 5
+        return score
+
+    prioritized_streams = sorted(streams, key=prioritize_stream)
+
+    # FAST path: pick best non-dummy stream without HTTP HEAD (series was slow due to multi HEAD)
     for st in prioritized_streams:
         url = st.get("url")
         if not url or st.get("_is_dummy") or _is_dummy_url(url):
             continue
-        if any(bad in url.lower() for bad in ["h265", "x265", "hev1"]):
-            continue
-        cookie = st.get("signCookie") or global_cookie or ""
-        try:
-            head_res = requests.head(url, headers={"User-Agent": "ExoPlayerLib/2.18.7", "Cookie": cookie}, timeout=3, verify=False)
-            if head_res.status_code in [200, 206, 302]:
-                working_stream = st
-                working_cookie = cookie
-                break
-        except:
-            continue
+        working_stream = st
+        working_cookie = st.get("signCookie") or global_cookie or ""
+        logger.info(f"FAST pick score={prioritize_stream(st)} url={url[:90]}")
+        break
 
-    # Pass 2: Fallback to playable HEVC stream if no non-HEVC stream is available
-    if not working_stream:
-        for st in prioritized_streams:
-            url = st.get("url")
-            if not url or st.get("_is_dummy") or _is_dummy_url(url):
-                continue
-            cookie = st.get("signCookie") or global_cookie or ""
-            try:
-                head_res = requests.head(url, headers={"User-Agent": "ExoPlayerLib/2.18.7", "Cookie": cookie}, timeout=3, verify=False)
-                if head_res.status_code in [200, 206, 302]:
-                    logger.info(f"Using fallback H265/HEVC stream: {url}")
-                    working_stream = st
-                    working_cookie = cookie
-                    break
-            except:
-                continue
+    # Optional: only HEAD-probe when URL is NOT trusted CDN (unknown host)
+    if working_stream and not _is_trusted_cdn(working_stream.get("url", "")):
+        try:
+            head_res = requests.head(
+                working_stream["url"],
+                headers={"User-Agent": "ExoPlayerLib/2.18.7", "Cookie": working_cookie or ""},
+                timeout=2,
+                verify=False,
+                allow_redirects=True,
+            )
+            if head_res.status_code not in (200, 206, 302, 301):
+                logger.warning(f"HEAD failed {head_res.status_code} for non-CDN url, keeping pick")
+        except Exception as e:
+            logger.warning(f"HEAD probe skipped/failed: {e}")
+
     subtitles_source = data.get("subTitleList", [])
     
     # PROIRITY: Resource Mirrors (UGC/Dubs like eyosi_as_iam)
@@ -1645,33 +1672,34 @@ def get_stream(subject_id: str, season: int = 1, episode: int = 1, quality: Opti
     except Exception as se:
         logger.warning(f"External subtitle probe failed: {se}")
 
-    # PICK BEST SUBTITLE FOR MPV (Default to English if found)
+    # PICK BEST SUBTITLE (Default to English if found)
     best_sub = next((s.get("url") for s in all_subtitles if s.get("lan") == "en" or "english" in (s.get("lanName") or "").lower()), None)
 
-    # DIRECT NATIVE LINK (No Proxy)
+    final_url = working_stream.get("url", "") or ""
+    is_hls = ".m3u8" in final_url.lower()
+    is_dash = ".mpd" in final_url.lower() or "/dash/" in final_url.lower()
+
+    # DIRECT CDN LINK — do NOT force proxy (saves Render bandwidth/RAM; series smoother)
     return {
-        "url": working_stream.get("url", ""),
-        "cookie": working_cookie,
+        "url": final_url,
+        "quality": working_stream.get("quality") or quality or "Auto",
+        "cookie": working_cookie or "",
+        "headers": {
+            "User-Agent": "ExoPlayerLib/2.18.7",
+            "Cookie": working_cookie or "",
+            "Referer": "https://moviebox.ph/",
+        },
         "duration": total_duration,
         "subtitles": all_subtitles,
         "subtitle_url": best_sub,
-        "isHls": working_stream.get("url", "").lower().endswith(".m3u8") or ".m3u8" in working_stream.get("url", "").lower(), 
+        "isHls": is_hls,
+        "isDash": is_dash,
+        "useProxy": False,
+        "cdnDirect": True,
         "streamId": working_stream.get("id"),
         "qualityList": list(set([st.get("quality") for st in streams if st.get("quality")])),
         "episode": episode,
-        "season": season
-    }
-
-    return {
-        "url": working_stream.get("url"),
-        "quality": working_stream.get("quality") or quality or "Auto",
-        "cookie": working_cookie,
-        "headers": {"User-Agent": "ExoPlayerLib/2.18.7", "Cookie": working_cookie or ""},
-        "subtitles": subtitles_source,
-        "isHls": working_stream.get("url", "").lower().endswith(".m3u8") or ".m3u8" in working_stream.get("url", "").lower(),
-        "streamId": working_stream.get("id"),
-        "qualityList": list(set([st.get("quality") for st in streams if st.get("quality")])),
-        "duration": total_duration
+        "season": season,
     }
 
 import os
